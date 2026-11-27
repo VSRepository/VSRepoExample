@@ -14,8 +14,8 @@ import {
 import { AuthorService } from "./author.service.js";
 import { CreateAuthorDto } from "./dto/create-author.dto.js";
 import { UpdateAuthorDto } from "./dto/update-author.dto.js";
-import { Author } from "./entities/author.entity.js";
 import { SearchAuthorQueryDto } from "./dto/search-author-query.dto.js";
+import { Author } from "../../generated/prisma/client.js";
 
 @Controller("author")
 export class AuthorController {

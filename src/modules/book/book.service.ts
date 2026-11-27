@@ -1,34 +1,29 @@
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { CreateBookDto } from "./dto/create-book.dto.js";
 import { UpdateBookDto } from "./dto/update-book.dto.js";
-import { BookRepository } from "./repositories/book.repository.js";
-import { Book } from "./entities/book.entity.js";
-import { AuthorService } from "../author/author.service.js";
-import { DeepPartial, VSRepoWhere } from "vsrepo";
-import { Transactional } from "@vsrepo/nestjs";
 import { SearchBookQueryDto } from "./dto/search-book-query.dto.js";
-import { Genre } from "./entities/genre.entity.js";
-import { GenreRepository } from "./repositories/genre.repository.js";
+import { PrismaService } from "../../infra/prisma/prisma.service.js";
+import { Book, Genre, Prisma } from "../../generated/prisma/client.js";
 
 @Injectable()
 export class BookService {
-    constructor(
-        private readonly bookRepository: BookRepository,
-        private readonly authorService: AuthorService,
-        private readonly genreRepository: GenreRepository,
-    ) {}
+    constructor(private readonly prisma: PrismaService) {}
 
     private assertExists<T>(book: T): asserts book is NonNullable<T> {
         if (!book) throw new NotFoundException("Book not found");
     }
 
-    private async assertIsbnIsAvailable(isbn: string): Promise<void> {
-        const exists = await this.bookRepository.existsByIsbn(isbn);
+    private async assertIsbnIsAvailable(isbn: string, tx?: Prisma.TransactionClient): Promise<void> {
+        const prisma = tx ?? this.prisma;
+
+        const exists = await prisma.book.findUnique({ where: { isbn }, select: { id: true } });
         if (exists) throw new ConflictException("There is already a book with this ISBN");
     }
 
-    private async persistManyGenresByName(names: string[]): Promise<Genre[]> {
-        const existingGenres = await this.genreRepository.findGenresByNameIn(names);
+    private async persistManyGenresByName(names: string[], tx?: Prisma.TransactionClient): Promise<Genre[]> {
+        const prisma = tx ?? this.prisma;
+
+        const existingGenres = await prisma.genre.findMany({ where: { name: { in: names } } });
         const existingGenresNames = new Set(existingGenres.map(genre => genre.name));
 
         const notExistingGenres: { name: string }[] = [];
@@ -37,21 +32,31 @@ export class BookService {
             if (!existingGenresNames.has(genre)) notExistingGenres.push({ name: genre });
         }
 
-        const newGenres = await this.genreRepository.createManyReturning(notExistingGenres);
+        const newGenres = await prisma.genre.createManyAndReturn({ data: notExistingGenres });
 
         return newGenres.concat(existingGenres);
     }
 
-    @Transactional()
     async create(dto: CreateBookDto): Promise<Book> {
-        await this.authorService.assertExistsById(dto.authorId);
-        if (dto.isbn) await this.assertIsbnIsAvailable(dto.isbn);
+        return await this.prisma.$transaction(async tx => {
+            const exists = await tx.author.findUnique({
+                where: { id: dto.authorId, deletedAt: null },
+                select: { id: true },
+            });
+            if (!exists) throw new NotFoundException("There is no author with the provided ID");
 
-        const genres = await this.persistManyGenresByName(dto.genres);
+            if (dto.isbn) await this.assertIsbnIsAvailable(dto.isbn, tx);
 
-        const book: DeepPartial<Book> = { ...dto, genres };
+            const genres = await this.persistManyGenresByName(dto.genres, tx);
 
-        return await this.bookRepository.save(book, { relations: { genres: true, author: true } });
+            return await tx.book.create({
+                data: {
+                    ...dto,
+                    genres: { connectOrCreate: genres.map(genre => ({ create: genre, where: { id: genre.id } })) },
+                },
+                include: { genres: true, author: true },
+            });
+        });
     }
 
     async findAll({
@@ -63,52 +68,64 @@ export class BookService {
         publicationDate,
         title,
     }: SearchBookQueryDto): Promise<Book[]> {
-        const where: VSRepoWhere<Book> = { author: { _with: { deletedAt: null } } };
-
-        if (authorId) where.authorId = authorId;
-        if (genre) where.genres = { _some: { name: genre } };
-        if (isbn) where.isbn = isbn;
-        if (publicationDate) where.publicationDate = publicationDate;
-        if (title) where.title = { contains: title };
-
-        return this.bookRepository
-            .createQueryBuilder()
-            .where(where)
-            .relations({ author: true, genres: true })
-            .relationsOptions({ genres: { order: { name: "ASC" } } })
-            .limit(perPage)
-            .offset((page - 1) * perPage)
-            .getResult();
+        return this.prisma.book.findMany({
+            where: {
+                author: { is: { deletedAt: null, id: authorId } },
+                genres: genre ? { some: { name: genre } } : undefined,
+                title: { contains: title },
+                publicationDate,
+                isbn,
+            },
+            include: { author: true, genres: { orderBy: { name: "asc" } } },
+            take: perPage,
+            skip: (page - 1) * perPage,
+        });
     }
 
     async findOne(id: string): Promise<Book> {
-        const book = await this.bookRepository.findOneByIdAndAuthorWithDeletedAtNull(id, {
-            relations: { genres: true, author: true },
+        const book = await this.prisma.book.findUnique({
+            where: { id, author: { is: { deletedAt: null } } },
+            include: { genres: true, author: true },
         });
         this.assertExists(book);
 
         return book;
     }
 
-    @Transactional()
     async update(id: string, dto: UpdateBookDto): Promise<Book> {
-        const book = await this.bookRepository.findOneByIdAndAuthorWithDeletedAtNull(id);
-        this.assertExists(book);
+        return await this.prisma.$transaction(async tx => {
+            const book = await tx.book.findUnique({ where: { id, author: { is: { deletedAt: null } } } });
+            this.assertExists(book);
 
-        if (dto.isbn && dto.isbn !== book.isbn) await this.assertIsbnIsAvailable(dto.isbn);
-        if (dto.authorId) await this.authorService.assertExistsById(dto.authorId);
+            if (dto.isbn && dto.isbn !== book.isbn) await this.assertIsbnIsAvailable(dto.isbn, tx);
+            if (dto.authorId) {
+                const exists = await tx.author.findUnique({
+                    where: { id: dto.authorId, deletedAt: null },
+                    select: { id: true },
+                });
+                if (!exists) throw new NotFoundException("There is no author with the provided ID");
+            }
 
-        const genres = dto.genres && (await this.persistManyGenresByName(dto.genres));
+            const genres = dto.genres && (await this.persistManyGenresByName(dto.genres, tx));
 
-        const bookData: DeepPartial<Book> = { ...dto, genres };
-
-        return await this.bookRepository.patch(id, bookData, { relations: { author: true, genres: true } });
+            return await tx.book.update({
+                where: { id },
+                data: {
+                    ...dto,
+                    genres: {
+                        set: genres ? [] : undefined,
+                        connectOrCreate: genres?.map(genre => ({ create: genre, where: { id: genre.id } })),
+                    },
+                },
+                include: { author: true, genres: true },
+            });
+        });
     }
 
     async remove(id: string): Promise<void> {
-        const book = await this.bookRepository.findOneByIdAndAuthorWithDeletedAtNull(id);
+        const book = await this.prisma.book.findUnique({ where: { id, author: { is: { deletedAt: null } } } });
         this.assertExists(book);
 
-        await this.bookRepository.deleteById(id);
+        await this.prisma.book.delete({ where: { id } });
     }
 }

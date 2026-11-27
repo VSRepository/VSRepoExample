@@ -14,8 +14,8 @@ import {
 import { BookService } from "./book.service.js";
 import { CreateBookDto } from "./dto/create-book.dto.js";
 import { UpdateBookDto } from "./dto/update-book.dto.js";
-import { Book } from "./entities/book.entity.js";
 import { SearchBookQueryDto } from "./dto/search-book-query.dto.js";
+import { Book } from "../../generated/prisma/client.js";
 
 @Controller("book")
 export class BookController {

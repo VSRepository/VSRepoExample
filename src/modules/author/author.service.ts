@@ -1,29 +1,26 @@
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { CreateAuthorDto } from "./dto/create-author.dto.js";
 import { UpdateAuthorDto } from "./dto/update-author.dto.js";
-import { AuthorRepository } from "./author.repository.js";
-import { Author } from "./entities/author.entity.js";
 import { SearchAuthorQueryDto } from "./dto/search-author-query.dto.js";
-import { VSSql } from "vsrepo";
 import { Visibility } from "../../common/enums/visibility.enum.js";
+import { PrismaService } from "../../infra/prisma/prisma.service.js";
+import { Author } from "../../generated/prisma/client.js";
 
 @Injectable()
 export class AuthorService {
-    constructor(private readonly authorRepository: AuthorRepository) {}
+    constructor(private readonly prisma: PrismaService) {}
 
     private assertExists<T>(author: T): asserts author is NonNullable<T> {
         if (!author) throw new NotFoundException("Author not found");
     }
 
     private async assertAuthorIsNotDuplicated(name: string, birthDate: Date, nationality: string): Promise<void> {
-        const exists = await this.authorRepository.existsByNameAndBirthDateAndNationality(name, birthDate, nationality);
+        const exists = await this.prisma.author.findFirst({
+            where: { name, birthDate, nationality, deletedAt: null },
+            select: { id: true },
+        });
 
         if (exists) throw new ConflictException("Author already registered");
-    }
-
-    async assertExistsById(id: string): Promise<void> {
-        const exists = await this.authorRepository.has(id);
-        if (!exists) throw new NotFoundException("There is no author with the provided ID");
     }
 
     async create(dto: CreateAuthorDto): Promise<Author> {
@@ -31,7 +28,7 @@ export class AuthorService {
             await this.assertAuthorIsNotDuplicated(dto.name, dto.birthDate, dto.nationality);
         }
 
-        return this.authorRepository.save(dto);
+        return this.prisma.author.create({ data: dto });
     }
 
     async findAll({
@@ -43,50 +40,32 @@ export class AuthorService {
         maxBirthDate,
         minBirthDate,
     }: SearchAuthorQueryDto): Promise<Author[]> {
-        const qb = this.authorRepository
-            .createRawQueryBuilder()
-            .select("*")
-            .from("Author")
-            .limit(perPage)
-            .offset((page - 1) * perPage);
-
-        switch (visibility) {
-            case Visibility.ACTIVE:
-                qb.where("deletedAt is null");
-                break;
-            case Visibility.REMOVED:
-                qb.where("deletedAt is not null");
-                break;
-        }
-
-        if (name) qb.andWhere(VSSql.sql`name like ${"%" + name + "%"}`);
-        if (nationality) qb.andWhere(VSSql.sql`nationality like ${"%" + nationality + "%"}`);
-        if (minBirthDate) qb.andWhere(VSSql.sql`birthDate >= ${minBirthDate}`);
-        if (maxBirthDate) qb.andWhere(VSSql.sql`birthDate <= ${maxBirthDate}`);
-
-        return qb.execute<Author[]>();
-
-        // Ou simplesmente:
-        //
-        // return this.authorRepository.find(
-        //     {
-        //         name: { contains: name },
-        //         nationality: { contains: nationality },
-        //         birthDate: { gte: minBirthDate, lte: maxBirthDate },
-        //     },
-        //     { pagination: { limit: perPage, offset: (page - 1) * perPage }, see: visibility },
-        // );
+        return this.prisma.author.findMany({
+            where: {
+                name: { contains: name },
+                nationality: { contains: nationality },
+                birthDate: { gte: minBirthDate, lte: maxBirthDate },
+                deletedAt:
+                    visibility === Visibility.ACTIVE
+                        ? null
+                        : visibility === Visibility.REMOVED
+                          ? { not: null }
+                          : undefined,
+            },
+            take: perPage,
+            skip: (page - 1) * perPage,
+        });
     }
 
     async findOne(id: string): Promise<Author> {
-        const author = await this.authorRepository.get(id);
+        const author = await this.prisma.author.findUnique({ where: { id, deletedAt: null } });
         this.assertExists(author);
 
         return author;
     }
 
     async update(id: string, dto: UpdateAuthorDto): Promise<Author> {
-        const author = await this.authorRepository.get(id);
+        const author = await this.prisma.author.findUnique({ where: { id, deletedAt: null } });
         this.assertExists(author);
 
         const finalName = dto.name ?? author.name;
@@ -103,20 +82,20 @@ export class AuthorService {
             await this.assertAuthorIsNotDuplicated(finalName, finalBirthDate, finalNationality);
         }
 
-        return this.authorRepository.patch(id, dto);
+        return this.prisma.author.update({ where: { id, deletedAt: null }, data: dto });
     }
 
     async remove(id: string): Promise<void> {
-        const author = await this.authorRepository.get(id);
+        const author = await this.prisma.author.findUnique({ where: { id, deletedAt: null } });
         this.assertExists(author);
 
-        await this.authorRepository.softRemove(id);
+        await this.prisma.author.update({ where: { id }, data: { deletedAt: new Date() } });
     }
 
     async recover(id: string): Promise<void> {
-        const author = await this.authorRepository.get(id, { see: "removed" });
+        const author = await this.prisma.author.findUnique({ where: { id, deletedAt: { not: null } } });
         this.assertExists(author);
 
-        await this.authorRepository.recover(id);
+        await this.prisma.author.update({ where: { id }, data: { deletedAt: null } });
     }
 }
