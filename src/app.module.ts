@@ -1,4 +1,4 @@
-import { Logger, Module, ValidationPipe } from "@nestjs/common";
+import { Module, ValidationPipe } from "@nestjs/common";
 import { AppController } from "./app.controller.js";
 import { AppService } from "./app.service.js";
 import { APP_FILTER, APP_PIPE } from "@nestjs/core";
@@ -27,7 +27,6 @@ import { VSLogLevel } from "vsrepo";
                 dbClient: prisma,
                 softDeleteField: "deletedAt",
                 logLevel: config.vsLogLevel,
-                logger: Logger,
                 adapterConfig: { logLevel: VSLogLevel.INFO },
             }),
         }),
