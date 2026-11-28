@@ -1,15 +1,22 @@
 import { Injectable } from "@nestjs/common";
-import { InjectAdapter } from "@vsrepo/nestjs";
 import { Genre } from "../entities/genre.entity.js";
-import { DynamicMethod, MethodOptions, VSRepoAdapter, VSRepository } from "vsrepo";
-import { OrmTypes } from "../../../common/types/orm-types.type.js";
+import { PrismaService } from "../../../infra/prisma/prisma.service.js";
+import { GenreCreateManyInput } from "../../../generated/prisma/models.js";
+import { TxOptions } from "../../../common/types/tx-options.type.js";
 
 @Injectable()
-export class GenreRepository extends VSRepository<Genre, string, OrmTypes> {
-    constructor(@InjectAdapter("Genre") adapter: VSRepoAdapter<Genre>) {
-        super({ adapter });
+export class GenreRepository {
+    constructor(private readonly prisma: PrismaService) {}
+
+    async createManyReturning(data: GenreCreateManyInput[], options?: TxOptions): Promise<Genre[]> {
+        const prisma = options?.tx ?? this.prisma;
+
+        return prisma.genre.createManyAndReturn({ data });
     }
 
-    @DynamicMethod()
-    declare findGenresByNameIn: (names: string[], options?: MethodOptions<Genre, OrmTypes>) => Promise<Genre[]>;
+    async findGenresByNameIn(names: string[], options?: TxOptions): Promise<Genre[]> {
+        const prisma = options?.tx ?? this.prisma;
+
+        return prisma.genre.findMany({ where: { name: { in: names } } });
+    }
 }

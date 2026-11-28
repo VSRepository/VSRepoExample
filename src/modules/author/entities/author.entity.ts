@@ -1,12 +1,3 @@
-import { Book } from "../../book/entities/book.entity.js";
+import { AuthorGetPayload } from "../../../generated/prisma/models.js";
 
-export class Author {
-    id: string;
-    name: string;
-    birthDate: Date | null;
-    nationality: string | null;
-    createdAt: Date;
-    updatedAt: Date;
-    deletedAt: Date | null;
-    books: Book[];
-}
+export interface Author extends AuthorGetPayload<{}> {}

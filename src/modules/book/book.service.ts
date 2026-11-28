@@ -4,11 +4,10 @@ import { UpdateBookDto } from "./dto/update-book.dto.js";
 import { BookRepository } from "./repositories/book.repository.js";
 import { Book } from "./entities/book.entity.js";
 import { AuthorService } from "../author/author.service.js";
-import { DeepPartial, VSRepoWhere } from "vsrepo";
-import { Transactional } from "@vsrepo/nestjs";
 import { SearchBookQueryDto } from "./dto/search-book-query.dto.js";
 import { Genre } from "./entities/genre.entity.js";
 import { GenreRepository } from "./repositories/genre.repository.js";
+import { Prisma } from "../../generated/prisma/client.js";
 
 @Injectable()
 export class BookService {
@@ -22,13 +21,13 @@ export class BookService {
         if (!book) throw new NotFoundException("Book not found");
     }
 
-    private async assertIsbnIsAvailable(isbn: string): Promise<void> {
-        const exists = await this.bookRepository.existsByIsbn(isbn);
+    private async assertIsbnIsAvailable(isbn: string, tx?: Prisma.TransactionClient): Promise<void> {
+        const exists = await this.bookRepository.existsByIsbn(isbn, { tx });
         if (exists) throw new ConflictException("There is already a book with this ISBN");
     }
 
-    private async persistManyGenresByName(names: string[]): Promise<Genre[]> {
-        const existingGenres = await this.genreRepository.findGenresByNameIn(names);
+    private async persistManyGenresByName(names: string[], tx?: Prisma.TransactionClient): Promise<Genre[]> {
+        const existingGenres = await this.genreRepository.findGenresByNameIn(names, { tx });
         const existingGenresNames = new Set(existingGenres.map(genre => genre.name));
 
         const notExistingGenres: { name: string }[] = [];
@@ -37,21 +36,26 @@ export class BookService {
             if (!existingGenresNames.has(genre)) notExistingGenres.push({ name: genre });
         }
 
-        const newGenres = await this.genreRepository.createManyReturning(notExistingGenres);
+        const newGenres = await this.genreRepository.createManyReturning(notExistingGenres, { tx });
 
         return newGenres.concat(existingGenres);
     }
 
-    @Transactional()
     async create(dto: CreateBookDto): Promise<Book> {
-        await this.authorService.assertExistsById(dto.authorId);
-        if (dto.isbn) await this.assertIsbnIsAvailable(dto.isbn);
+        return await this.bookRepository.transaction(async tx => {
+            await this.authorService.assertExistsById(dto.authorId, tx);
+            if (dto.isbn) await this.assertIsbnIsAvailable(dto.isbn, tx);
 
-        const genres = await this.persistManyGenresByName(dto.genres);
+            const genres = await this.persistManyGenresByName(dto.genres, tx);
 
-        const book: DeepPartial<Book> = { ...dto, genres };
-
-        return await this.bookRepository.save(book, { relations: { genres: true, author: true } });
+            return await this.bookRepository.save(
+                {
+                    ...dto,
+                    genres: { connectOrCreate: genres.map(genre => ({ create: genre, where: { id: genre.id } })) },
+                },
+                { include: { genres: true, author: true }, tx },
+            );
+        });
     }
 
     async findAll({
@@ -63,46 +67,53 @@ export class BookService {
         publicationDate,
         title,
     }: SearchBookQueryDto): Promise<Book[]> {
-        const where: VSRepoWhere<Book> = { author: { _with: { deletedAt: null } } };
-
-        if (authorId) where.authorId = authorId;
-        if (genre) where.genres = { _some: { name: genre } };
-        if (isbn) where.isbn = isbn;
-        if (publicationDate) where.publicationDate = publicationDate;
-        if (title) where.title = { contains: title };
-
-        return this.bookRepository
-            .createQueryBuilder()
-            .where(where)
-            .relations({ author: true, genres: true })
-            .relationsOptions({ genres: { order: { name: "ASC" } } })
-            .limit(perPage)
-            .offset((page - 1) * perPage)
-            .getResult();
+        return this.bookRepository.find(
+            {
+                author: { is: { deletedAt: null, id: authorId } },
+                genres: genre ? { some: { name: genre } } : undefined,
+                title: { contains: title },
+                publicationDate,
+                isbn,
+            },
+            {
+                include: { author: true, genres: { orderBy: { name: "asc" } } },
+                take: perPage,
+                skip: (page - 1) * perPage,
+            },
+        );
     }
 
     async findOne(id: string): Promise<Book> {
         const book = await this.bookRepository.findOneByIdAndAuthorWithDeletedAtNull(id, {
-            relations: { genres: true, author: true },
+            include: { genres: true, author: true },
         });
         this.assertExists(book);
 
         return book;
     }
 
-    @Transactional()
     async update(id: string, dto: UpdateBookDto): Promise<Book> {
-        const book = await this.bookRepository.findOneByIdAndAuthorWithDeletedAtNull(id);
-        this.assertExists(book);
+        return await this.bookRepository.transaction(async tx => {
+            const book = await this.bookRepository.findOneByIdAndAuthorWithDeletedAtNull(id, { tx });
+            this.assertExists(book);
 
-        if (dto.isbn && dto.isbn !== book.isbn) await this.assertIsbnIsAvailable(dto.isbn);
-        if (dto.authorId) await this.authorService.assertExistsById(dto.authorId);
+            if (dto.isbn && dto.isbn !== book.isbn) await this.assertIsbnIsAvailable(dto.isbn, tx);
+            if (dto.authorId) await this.authorService.assertExistsById(dto.authorId, tx);
 
-        const genres = dto.genres && (await this.persistManyGenresByName(dto.genres));
+            const genres = dto.genres && (await this.persistManyGenresByName(dto.genres, tx));
 
-        const bookData: DeepPartial<Book> = { ...dto, genres };
-
-        return await this.bookRepository.patch(id, bookData, { relations: { author: true, genres: true } });
+            return await this.bookRepository.patch(
+                id,
+                {
+                    ...dto,
+                    genres: {
+                        set: genres ? [] : undefined,
+                        connectOrCreate: genres?.map(genre => ({ create: genre, where: { id: genre.id } })),
+                    },
+                },
+                { include: { author: true, genres: true }, tx },
+            );
+        });
     }
 
     async remove(id: string): Promise<void> {

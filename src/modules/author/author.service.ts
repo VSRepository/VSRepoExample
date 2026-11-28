@@ -4,8 +4,8 @@ import { UpdateAuthorDto } from "./dto/update-author.dto.js";
 import { AuthorRepository } from "./author.repository.js";
 import { Author } from "./entities/author.entity.js";
 import { SearchAuthorQueryDto } from "./dto/search-author-query.dto.js";
-import { VSSql } from "vsrepo";
 import { Visibility } from "../../common/enums/visibility.enum.js";
+import { Prisma } from "../../generated/prisma/client.js";
 
 @Injectable()
 export class AuthorService {
@@ -21,8 +21,8 @@ export class AuthorService {
         if (exists) throw new ConflictException("Author already registered");
     }
 
-    async assertExistsById(id: string): Promise<void> {
-        const exists = await this.authorRepository.has(id);
+    async assertExistsById(id: string, tx?: Prisma.TransactionClient): Promise<void> {
+        const exists = await this.authorRepository.has(id, { tx });
         if (!exists) throw new NotFoundException("There is no author with the provided ID");
     }
 
@@ -43,39 +43,22 @@ export class AuthorService {
         maxBirthDate,
         minBirthDate,
     }: SearchAuthorQueryDto): Promise<Author[]> {
-        const qb = this.authorRepository
-            .createRawQueryBuilder()
-            .select("*")
-            .from("Author")
-            .limit(perPage)
-            .offset((page - 1) * perPage);
+        const visibilityFilter =
+            visibility === Visibility.ACTIVE
+                ? Prisma.raw("deletedAt is null")
+                : visibility === Visibility.REMOVED
+                  ? Prisma.raw("deletedAt is not null")
+                  : Prisma.raw("1=1");
+        let query = Prisma.sql`select * from Author where ${visibilityFilter} `;
 
-        switch (visibility) {
-            case Visibility.ACTIVE:
-                qb.where("deletedAt is null");
-                break;
-            case Visibility.REMOVED:
-                qb.where("deletedAt is not null");
-                break;
-        }
+        if (name) query = Prisma.sql`${query} and name like ${"%" + name + "%"}`;
+        if (nationality) query = Prisma.sql`${query} and nationality like ${"%" + nationality + "%"}`;
+        if (minBirthDate) query = Prisma.sql`${query} and birthDate >= ${minBirthDate}`;
+        if (maxBirthDate) query = Prisma.sql`${query} and birthDate <= ${maxBirthDate}`;
 
-        if (name) qb.andWhere(VSSql.sql`name like ${"%" + name + "%"}`);
-        if (nationality) qb.andWhere(VSSql.sql`nationality like ${"%" + nationality + "%"}`);
-        if (minBirthDate) qb.andWhere(VSSql.sql`birthDate >= ${minBirthDate}`);
-        if (maxBirthDate) qb.andWhere(VSSql.sql`birthDate <= ${maxBirthDate}`);
+        query = Prisma.sql`${query} limit ${perPage} offset ${(page - 1) * perPage}`;
 
-        return qb.execute<Author[]>();
-
-        // Ou simplesmente:
-        //
-        // return this.authorRepository.find(
-        //     {
-        //         name: { contains: name },
-        //         nationality: { contains: nationality },
-        //         birthDate: { gte: minBirthDate, lte: maxBirthDate },
-        //     },
-        //     { pagination: { limit: perPage, offset: (page - 1) * perPage }, see: visibility },
-        // );
+        return this.authorRepository.execute<Author[]>(query);
     }
 
     async findOne(id: string): Promise<Author> {
