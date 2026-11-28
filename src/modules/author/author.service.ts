@@ -4,7 +4,7 @@ import { UpdateAuthorDto } from "./dto/update-author.dto.js";
 import { SearchAuthorQueryDto } from "./dto/search-author-query.dto.js";
 import { Visibility } from "../../common/enums/visibility.enum.js";
 import { PrismaService } from "../../infra/prisma/prisma.service.js";
-import { Author } from "../../generated/prisma/client.js";
+import { Author, Prisma } from "../../generated/prisma/client.js";
 
 @Injectable()
 export class AuthorService {
@@ -40,21 +40,22 @@ export class AuthorService {
         maxBirthDate,
         minBirthDate,
     }: SearchAuthorQueryDto): Promise<Author[]> {
-        return this.prisma.author.findMany({
-            where: {
-                name: { contains: name },
-                nationality: { contains: nationality },
-                birthDate: { gte: minBirthDate, lte: maxBirthDate },
-                deletedAt:
-                    visibility === Visibility.ACTIVE
-                        ? null
-                        : visibility === Visibility.REMOVED
-                          ? { not: null }
-                          : undefined,
-            },
-            take: perPage,
-            skip: (page - 1) * perPage,
-        });
+        const visibilityFilter =
+            visibility === Visibility.ACTIVE
+                ? Prisma.raw("deletedAt is null")
+                : visibility === Visibility.REMOVED
+                  ? Prisma.raw("deletedAt is not null")
+                  : Prisma.raw("1=1");
+        let query = Prisma.sql`select * from Author where ${visibilityFilter} `;
+
+        if (name) query = Prisma.sql`${query} and name like ${"%" + name + "%"}`;
+        if (nationality) query = Prisma.sql`${query} and nationality like ${"%" + nationality + "%"}`;
+        if (minBirthDate) query = Prisma.sql`${query} and birthDate >= ${minBirthDate}`;
+        if (maxBirthDate) query = Prisma.sql`${query} and birthDate <= ${maxBirthDate}`;
+
+        query = Prisma.sql`${query} limit ${perPage} offset ${(page - 1) * perPage}`;
+
+        return this.prisma.$queryRaw<Author[]>`${query}`;
     }
 
     async findOne(id: string): Promise<Author> {

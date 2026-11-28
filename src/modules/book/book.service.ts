@@ -126,6 +126,6 @@ export class BookService {
         const book = await this.prisma.book.findUnique({ where: { id, author: { is: { deletedAt: null } } } });
         this.assertExists(book);
 
-        await this.prisma.book.delete({ where: { id } });
+        await this.prisma.$executeRawUnsafe<number>('delete from "Book" where id = ?', id);
     }
 }
